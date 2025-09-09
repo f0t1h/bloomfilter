@@ -235,27 +235,6 @@ static FBLOOM_INT_TYPE murmur_hash2(const void *data, size_t len, FBLOOM_INT_TYP
   return FBLOOM_NAME(murmurhash)((const char*)data, (uint32_t)len, seed ^ 0x87654321UL);
 }
 
-// Legacy hash functions (kept for backward compatibility)
-static FBLOOM_INT_TYPE hash1(const void *data, size_t len, FBLOOM_INT_TYPE seed) {
-  const unsigned char *bytes = (const unsigned char *)data;
-  FBLOOM_INT_TYPE hash = seed ^ 5381;
-  size_t i;
-  for (i = 0; i < len; i++) {
-    hash = ((hash << 5) + hash) + bytes[i];
-  }
-  return hash;
-}
-
-static FBLOOM_INT_TYPE hash2(const void *data, size_t len, FBLOOM_INT_TYPE seed) {
-  const unsigned char *bytes = (const unsigned char *)data;
-  FBLOOM_INT_TYPE hash = seed;
-  size_t i;
-  for (i = 0; i < len; i++) {
-    hash = bytes[i] + (hash << 6) + (hash << 16) - hash;
-  }
-  return hash;
-}
-
 static FBLOOM_INT_TYPE get_hash(const void *data, size_t len, size_t i,
                                  size_t num_bits, FBLOOM_NAME(hash_func_t) hash_func1,
                                  FBLOOM_NAME(hash_func_t) hash_func2) {
