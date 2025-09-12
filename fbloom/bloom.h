@@ -27,7 +27,7 @@
 #define _FBLOOM_CONCAT_EVAL(prefix, name) _FBLOOM_CONCAT(prefix, name)
 #define FBLOOM_NAME(name) _FBLOOM_CONCAT_EVAL(FBLOOM_PREFIX, name)
 
-typedef FBLOOM_INT_TYPE (*FBLOOM_NAME(hash_func_t))(const void *data, size_t len, FBLOOM_INT_TYPE seed);
+typedef FBLOOM_INT_TYPE (*FBLOOM_NAME(hash_func_t))(const void *data, size_t len);
 
 typedef struct FBLOOM_NAME(filter) {
   unsigned char *bit_array;
@@ -52,6 +52,10 @@ FBLOOM_SCOPE bool FBLOOM_NAME(contains)(FBLOOM_NAME(filter) *filter, const void 
                                         size_t item_size);
 FBLOOM_SCOPE bool FBLOOM_NAME(insert)(FBLOOM_NAME(filter) *filter, const void *item,
                                       size_t item_size);
+FBLOOM_SCOPE bool FBLOOM_NAME(insert_with_hash)(FBLOOM_NAME(filter) *filter, 
+                                                FBLOOM_INT_TYPE hash1, FBLOOM_INT_TYPE hash2);
+FBLOOM_SCOPE bool FBLOOM_NAME(contains_with_hash)(FBLOOM_NAME(filter) *filter, 
+                                                  FBLOOM_INT_TYPE hash1, FBLOOM_INT_TYPE hash2);
 FBLOOM_SCOPE void FBLOOM_NAME(clear)(FBLOOM_NAME(filter) *filter);
 
 
@@ -66,7 +70,7 @@ extern "C" {
  *  - murmurhash -
  * copyright (c) 2014-2025 joseph werle <joseph.werle@gmail.com>
  */
-  uint32_t FBLOOM_NAME(murmurhash) (const char*, uint32_t, uint32_t);
+uint32_t FBLOOM_NAME(murmurhash) (const char*, uint32_t, uint32_t);
 #ifdef __cplusplus
 }
 #endif
@@ -77,7 +81,6 @@ extern "C" {
 #include <string>
 #include <stdexcept>
 #include <type_traits>
-#include <cstring>
 
 FBLOOM_NAMESPACE_BEGIN
 class BloomFilter {
@@ -85,6 +88,7 @@ private:
     FBLOOM_NAME(filter) filter_;
 
 public:
+  using hash_func_t = FBLOOM_NAME(hash_func_t);
     BloomFilter(size_t expected_elements, double false_positive_rate);
     
     template<typename HashFunc1, typename HashFunc2>
@@ -100,10 +104,17 @@ public:
     BloomFilter& operator=(BloomFilter&& other) noexcept;
 
     template<typename T>
+    std::pair<FBLOOM_INT_TYPE, FBLOOM_INT_TYPE> get_hash(const T& item) const;
+    
+    template<typename T>
     bool insert(const T& item);
     
     template<typename T>
     bool contains(const T& item) const;
+    
+    bool insert_with_hash(FBLOOM_INT_TYPE hash1, FBLOOM_INT_TYPE hash2);
+    bool contains_with_hash(FBLOOM_INT_TYPE hash1, FBLOOM_INT_TYPE hash2) const;
+    
     void clear();
 
     size_t inserted_elements() const;
@@ -211,41 +222,45 @@ static size_t calculate_hash_functions(size_t num_bits,
   size_t k;
   if (expected_elements == 0)
     return 1;
-  k = (size_t)((double)num_bits / expected_elements * 0.693147);
+  k = (size_t)((double)num_bits / expected_elements * 0.6931471805599453);
   return k > 0 ? k : 1;
 }
 
 static size_t calculate_bit_array_size(size_t expected_elements,
                                        double false_positive_rate) {
-  double m;
   if (expected_elements == 0 || false_positive_rate <= 0.0 ||
       false_positive_rate >= 1.0) {
-    return 1024;
+    return 1024; // bytes (8192 bits)
   }
-  m = -(expected_elements * log(false_positive_rate)) /
-      (0.480453 * 0.480453);
-  return (size_t)(m / 8) + 1;
+  /* Use same sizing as Gloom: m_bits = -n ln(p) / ln(2)^4, rounded and 64-bit aligned */
+  const double LN2_SQ = 0.4804530139182014; /* (ln 2)^2 */
+  double m_bits = -( (double)expected_elements * log(false_positive_rate) ) / LN2_SQ;
+  m_bits *= (1.0 / LN2_SQ); /* divide by ln(2)^2 again → ln(2)^4 total */
+  if (m_bits < 64.0) m_bits = 64.0;
+  uint64_t bits = (uint64_t)(m_bits + 0.5); /* round to nearest */
+  bits = ((bits + 63) / 64) * 64; /* align to 64-bit boundary */
+  return (size_t)(bits / 8); /* return bytes */
 }
 
-static FBLOOM_INT_TYPE murmur_hash1(const void *data, size_t len, FBLOOM_INT_TYPE seed) {
-  return FBLOOM_NAME(murmurhash)((const char*)data, (uint32_t)len, seed);
+static FBLOOM_INT_TYPE FBLOOM_NAME(_murmur_hash1)(const void *data, size_t len) {
+  return FBLOOM_NAME(murmurhash)((const char*)data, (uint32_t)len, 0);
 }
 
-static FBLOOM_INT_TYPE murmur_hash2(const void *data, size_t len, FBLOOM_INT_TYPE seed) {
-  return FBLOOM_NAME(murmurhash)((const char*)data, (uint32_t)len, seed ^ 0x87654321UL);
+static FBLOOM_INT_TYPE FBLOOM_NAME(_murmur_hash2)(const void *data, size_t len) {
+  return FBLOOM_NAME(murmurhash)((const char*)data, (uint32_t)len, 0x87654321UL);
 }
 
-static FBLOOM_INT_TYPE get_hash(const void *data, size_t len, size_t i,
+static FBLOOM_INT_TYPE FBLOOM_NAME(_get_hash)(const void *data, size_t len, size_t i,
                                  size_t num_bits, FBLOOM_NAME(hash_func_t) hash_func1,
                                  FBLOOM_NAME(hash_func_t) hash_func2) {
   FBLOOM_INT_TYPE h1;
   FBLOOM_INT_TYPE h2;
-  h1 = hash_func1(data, len, 0x9E3779B1UL);
-  h2 = hash_func2(data, len, 0x85EBCA6BUL);
+  h1 = hash_func1(data, len);
+  h2 = hash_func2(data, len);
   return (h1 + i * h2) % num_bits;
 }
 
-static void set_bit(unsigned char *bit_array, size_t bit_index) {
+static void FBLOOM_NAME(_set_bit)(unsigned char *bit_array, size_t bit_index) {
   size_t byte_index;
   size_t bit_offset;
   byte_index = bit_index / 8;
@@ -253,7 +268,7 @@ static void set_bit(unsigned char *bit_array, size_t bit_index) {
   bit_array[byte_index] |= (1 << bit_offset);
 }
 
-static bool is_bit_set(const unsigned char *bit_array, size_t bit_index) {
+static bool FBLOOM_NAME(_is_bit_set)(const unsigned char *bit_array, size_t bit_index) {
   size_t byte_index;
   size_t bit_offset;
   byte_index = bit_index / 8;
@@ -265,7 +280,7 @@ FBLOOM_SCOPE bool FBLOOM_NAME(init)(FBLOOM_NAME(filter) *filter,
                                     size_t expected_elements,
                                     double false_positive_rate) {
   return FBLOOM_NAME(init_with_hash)(filter, expected_elements, false_positive_rate,
-                                     murmur_hash1, murmur_hash2);
+                                     FBLOOM_NAME(_murmur_hash1), FBLOOM_NAME(_murmur_hash2));
 }
 
 FBLOOM_SCOPE bool FBLOOM_NAME(init_with_hash)(FBLOOM_NAME(filter) *filter,
@@ -319,9 +334,9 @@ FBLOOM_SCOPE bool FBLOOM_NAME(contains)(FBLOOM_NAME(filter) *filter, const void 
   }
 
   for (i = 0; i < filter->num_hash_functions; i++) {
-    bit_index = get_hash(item, item_size, i, filter->num_bits, filter->hash1,
+    bit_index = FBLOOM_NAME(_get_hash)(item, item_size, i, filter->num_bits, filter->hash1,
                          filter->hash2);
-    if (!is_bit_set(filter->bit_array, (size_t)bit_index)) {
+    if (!FBLOOM_NAME(_is_bit_set)(filter->bit_array, (size_t)bit_index)) {
       return false;
     }
   }
@@ -338,12 +353,48 @@ FBLOOM_SCOPE bool FBLOOM_NAME(insert)(FBLOOM_NAME(filter) *filter, const void *i
   }
 
   for (i = 0; i < filter->num_hash_functions; i++) {
-    bit_index = get_hash(item, item_size, i, filter->num_bits, filter->hash1,
+    bit_index = FBLOOM_NAME(_get_hash)(item, item_size, i, filter->num_bits, filter->hash1,
                          filter->hash2);
-    set_bit(filter->bit_array, (size_t)bit_index);
+    FBLOOM_NAME(_set_bit)(filter->bit_array, (size_t)bit_index);
   }
 
   filter->inserted_elements++;
+  return true;
+}
+
+FBLOOM_SCOPE bool FBLOOM_NAME(insert_with_hash)(FBLOOM_NAME(filter) *filter, 
+                                                FBLOOM_INT_TYPE hash1, FBLOOM_INT_TYPE hash2) {
+  size_t i;
+  FBLOOM_INT_TYPE bit_index;
+
+  if (!filter || !filter->hash1 || !filter->hash2) {
+    return false;
+  }
+
+  for (i = 0; i < filter->num_hash_functions; i++) {
+    bit_index = (hash1 + i * hash2) % filter->num_bits;
+    FBLOOM_NAME(_set_bit)(filter->bit_array, (size_t)bit_index);
+  }
+
+  filter->inserted_elements++;
+  return true;
+}
+
+FBLOOM_SCOPE bool FBLOOM_NAME(contains_with_hash)(FBLOOM_NAME(filter) *filter, 
+                                                  FBLOOM_INT_TYPE hash1, FBLOOM_INT_TYPE hash2) {
+  size_t i;
+  FBLOOM_INT_TYPE bit_index;
+
+  if (!filter || !filter->hash1 || !filter->hash2) {
+    return false;
+  }
+
+  for (i = 0; i < filter->num_hash_functions; i++) {
+    bit_index = (hash1 + i * hash2) % filter->num_bits;
+    if (!FBLOOM_NAME(_is_bit_set)(filter->bit_array, (size_t)bit_index)) {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -360,7 +411,7 @@ FBLOOM_SCOPE void FBLOOM_NAME(clear)(FBLOOM_NAME(filter) *filter) {
 FBLOOM_NAMESPACE_BEGIN
 inline BloomFilter::BloomFilter(size_t expected_elements, double false_positive_rate) {
     if (!FBLOOM_NAME(init_with_hash)(&filter_, expected_elements, false_positive_rate, 
-                                     murmur_hash1, murmur_hash2)) {
+                                     FBLOOM_NAME(_murmur_hash1), FBLOOM_NAME(_murmur_hash2))) {
         throw std::runtime_error("Failed to initialize bloom filter");
     }
 }
@@ -391,31 +442,40 @@ inline BloomFilter& BloomFilter::operator=(BloomFilter&& other) noexcept {
 }
 
 template<typename T>
+inline std::pair<FBLOOM_INT_TYPE, FBLOOM_INT_TYPE> BloomFilter::get_hash(const T& item) const {
+  FBLOOM_INT_TYPE hv1;
+  FBLOOM_INT_TYPE hv2;
+  if constexpr (std::is_same<T, std::string>::value) {
+    hv1 = filter_.hash1(item.c_str(), item.length());
+    hv2 = filter_.hash2(item.c_str(), item.length());
+  } else if constexpr (std::is_same<T, const char*>::value || std::is_same<T, char*>::value) {
+    hv1 = filter_.hash1(item, std::strlen(item));
+    hv2 = filter_.hash2(item, std::strlen(item));
+  } else if constexpr (std::is_trivially_copyable_v<T>) {
+    hv1 = filter_.hash1(reinterpret_cast<const void*>(&item), sizeof(T));
+    hv2 = filter_.hash2(reinterpret_cast<const void*>(&item), sizeof(T));
+  }
+  return std::make_pair(hv1, hv2);
+}
+
+template<typename T>
 inline bool BloomFilter::insert(const T& item) {
-    if constexpr (std::is_same_v<T, std::string>) {
-        return FBLOOM_NAME(insert)(&filter_, item.c_str(), item.length());
-    } else if constexpr (std::is_same_v<T, const char*> || std::is_same_v<T, char*>) {
-        return FBLOOM_NAME(insert)(&filter_, item, std::strlen(item));
-    } else if constexpr (std::is_trivially_copyable_v<T>) {
-        return FBLOOM_NAME(insert)(&filter_, reinterpret_cast<const void*>(&item), sizeof(T));
-    } else {
-        static_assert(std::is_trivially_copyable_v<T>, "Type must be trivially copyable or std::string");
-        return false;
-    }
+    auto hv = get_hash(item);
+    return FBLOOM_NAME(insert_with_hash)(&filter_, hv.first, hv.second);
 }
 
 template<typename T>
 inline bool BloomFilter::contains(const T& item) const {
-    if constexpr (std::is_same_v<T, std::string>) {
-        return FBLOOM_NAME(contains)(const_cast<FBLOOM_NAME(filter)*>(&filter_), item.c_str(), item.length());
-    } else if constexpr (std::is_same_v<T, const char*> || std::is_same_v<T, char*>) {
-        return FBLOOM_NAME(contains)(const_cast<FBLOOM_NAME(filter)*>(&filter_), item, std::strlen(item));
-    } else if constexpr (std::is_trivially_copyable_v<T>) {
-        return FBLOOM_NAME(contains)(const_cast<FBLOOM_NAME(filter)*>(&filter_), reinterpret_cast<const void*>(&item), sizeof(T));
-    } else {
-        static_assert(std::is_trivially_copyable_v<T>, "Type must be trivially copyable or std::string");
-        return false;
-    }
+    auto hv = get_hash(item);
+    return FBLOOM_NAME(contains_with_hash)(const_cast<FBLOOM_NAME(filter)*>(&filter_), hv.first, hv.second);
+}
+
+inline bool BloomFilter::insert_with_hash(FBLOOM_INT_TYPE hash1, FBLOOM_INT_TYPE hash2) {
+    return FBLOOM_NAME(insert_with_hash)(&filter_, hash1, hash2);
+}
+
+inline bool BloomFilter::contains_with_hash(FBLOOM_INT_TYPE hash1, FBLOOM_INT_TYPE hash2) const {
+    return FBLOOM_NAME(contains_with_hash)(const_cast<FBLOOM_NAME(filter)*>(&filter_), hash1, hash2);
 }
 
 inline void BloomFilter::clear() {
