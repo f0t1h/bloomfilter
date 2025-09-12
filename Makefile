@@ -28,9 +28,6 @@ all: $(BENCHMARK_EXE)
 $(BENCHMARK_EXE): $(BENCHMARK_SRC) $(HEADERS)
 	$(CXX) $(CXXFLAGS) -o $@ $<
 
-# Alias target for convenience
-simple_benchmark: $(BENCHMARK_EXE)
-
 # Run targets
 run: $(BENCHMARK_EXE)
 	@echo "Running benchmark..."
@@ -60,7 +57,6 @@ help:
 	@echo ""
 	@echo "Build Targets:"
 	@echo "  all              - Build benchmark (default)"
-	@echo "  simple_benchmark - Build benchmark"
 	@echo "  debug            - Build debug version with symbols"
 	@echo ""
 	@echo "Run Targets:"
@@ -76,4 +72,4 @@ help:
 	@echo "Compiler: $(CXX)"
 	@echo "Flags: $(CXXFLAGS)"
 
-.PHONY: all simple_benchmark debug run viz clean help
+.PHONY: all debug run viz clean help
