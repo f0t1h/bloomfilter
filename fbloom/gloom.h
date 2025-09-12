@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -63,7 +64,6 @@ public:
     per_filter_bits = ((per_filter_bits + 63) / 64) * 64;
     filters = make_array_bits(per_filter_bits, std::make_index_sequence<num_filters>());
     num_hash_functions = calculate_hash_functions(per_filter_bits, expected_elements_per_filter);
-
   }
 
   GloomFilter(size_t expected_elements, double false_positive_rate,
@@ -100,12 +100,11 @@ public:
       h2_64 = hashf2(reinterpret_cast<const void *>(&item), sizeof(T));
     }
     uint32_t h1 = static_cast<uint32_t>(h1_64);
-    uint32_t h2 = static_cast<uint32_t>(h2_64) | 1u; // ensure odd stride to improve coverage
+    uint32_t h2 = static_cast<uint32_t>(h2_64) | 1u;
     return {h1, h2};
   }
   template <typename T> bool insert(const T &item, int tid) {
     {
-      // Bulk dequeue for efficiency
       size_t count = queues[tid].try_dequeue_bulk(bulk_reading[tid].data(), BULK_READ_MAX);
       for (size_t j = 0; j < count; ++j) {
         const auto& hv = bulk_reading[tid][j];
@@ -128,11 +127,64 @@ public:
     }
     return true;
   }
-  // Ensure all forwarded inserts are applied to shards
+
+
+private:
+  // Common bulk insert implementation
+  template <typename Iterator>
+  size_t insert_bulk_impl(Iterator begin, Iterator end, int tid) {
+    size_t inserted_count = 0;
+    
+    {
+      bulk_reading[tid].clear();
+      size_t count = queues[tid].try_dequeue_bulk(std::back_inserter(bulk_reading[tid]), BULK_READ_MAX);
+      for (size_t j = 0; j < count; ++j) {
+        const auto& hv = bulk_reading[tid][j];
+        uint64_t h1 = hv.first;
+        uint64_t h2 = hv.second;
+        for (size_t i = 0; i < num_hash_functions; ++i) {
+          filters[tid].set(h1 + static_cast<uint64_t>(i) * h2);
+        }
+      }
+    }
+
+    for (auto it = begin; it != end; ++it) {
+      auto [hash_value1, hash_value2] = get_hash(*it);
+      size_t target_filter = (static_cast<unsigned>(hash_value1) >> 16) & bit_mask;
+      
+      if (tid == static_cast<int>(target_filter)) {
+        for (size_t i = 0; i < num_hash_functions; ++i) {
+          filters[target_filter].set(static_cast<uint64_t>(hash_value1) + static_cast<uint64_t>(i) * static_cast<uint64_t>(hash_value2));
+        }
+        ++inserted_count;
+      } else {
+        queues[target_filter].enqueue({hash_value1, hash_value2});
+      }
+    }
+    
+    return inserted_count;
+  }
+
+
+public:
+  template <typename Iterator>
+  size_t insert_bulk(Iterator begin, Iterator end, int tid) {
+    return insert_bulk_impl(begin, end, tid);
+  }
+
+
+#if __cpp_lib_ranges >= 201911L
+  template <std::ranges::input_range Range>
+  size_t insert_bulk_range(const Range& range, int tid) {
+    return insert_bulk_impl(range.begin(), range.end(), tid);
+  }
+
+#endif
+
   void flush() {
     for (unsigned tid = 0; tid < num_filters; ++tid) {
-      // Use bulk dequeue for efficiency
-      size_t count = queues[tid].try_dequeue_bulk(bulk_reading[tid].data(), BULK_READ_MAX);
+      bulk_reading[tid].clear();
+      size_t count = queues[tid].try_dequeue_bulk(std::back_inserter(bulk_reading[tid]), BULK_READ_MAX);
       while (count > 0) {
         for (size_t j = 0; j < count; ++j) {
           const auto& hv = bulk_reading[tid][j];
@@ -142,7 +194,8 @@ public:
             filters[tid].set(h1 + static_cast<uint64_t>(i) * h2);
           }
         }
-        count = queues[tid].try_dequeue_bulk(bulk_reading[tid].data(), BULK_READ_MAX);
+        bulk_reading[tid].clear();
+        count = queues[tid].try_dequeue_bulk(std::back_inserter(bulk_reading[tid]), BULK_READ_MAX);
       }
     }
   }
@@ -169,7 +222,6 @@ public:
     double m_bits = -(static_cast<double>(expected_elements) *
                       std::log(false_positive_rate)) /
                     LN2_SQ;
-    // Match baseline BloomFilter memory sizing (which effectively uses ln(2)^4)
     m_bits *= (1.0 / LN2_SQ);
     if (m_bits < 64.0)
       m_bits = 64.0;
@@ -190,8 +242,6 @@ public:
   make_array(size_t expected_elements, double false_positive_rate,
              HashFunc1 hash1_func, HashFunc2 hash2_func,
              std::index_sequence<I...>) {
-    // Create array of LockedBloomFilter instances, each initialized with the
-    // same parameters
     (void)hash1_func; (void)hash2_func;
     uint64_t bit_count =
         calculate_bit_array_size(expected_elements, false_positive_rate);
