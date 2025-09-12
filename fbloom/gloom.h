@@ -63,6 +63,7 @@ public:
     per_filter_bits = ((per_filter_bits + 63) / 64) * 64;
     filters = make_array_bits(per_filter_bits, std::make_index_sequence<num_filters>());
     num_hash_functions = calculate_hash_functions(per_filter_bits, expected_elements_per_filter);
+
   }
 
   GloomFilter(size_t expected_elements, double false_positive_rate,
@@ -104,15 +105,15 @@ public:
   }
   template <typename T> bool insert(const T &item, int tid) {
     {
-      size_t drained = 0;
-      std::pair<uint32_t, uint32_t> hv;
-      while (drained < static_cast<size_t>(BULK_READ_MAX) && queues[tid].try_dequeue(hv)) {
+      // Bulk dequeue for efficiency
+      size_t count = queues[tid].try_dequeue_bulk(bulk_reading[tid].data(), BULK_READ_MAX);
+      for (size_t j = 0; j < count; ++j) {
+        const auto& hv = bulk_reading[tid][j];
         uint64_t h1 = hv.first;
         uint64_t h2 = hv.second;
         for (size_t i = 0; i < num_hash_functions; ++i) {
           filters[tid].set(h1 + static_cast<uint64_t>(i) * h2);
         }
-        ++drained;
       }
     }
     auto [hash_value1, hash_value2] = get_hash(item);
@@ -130,13 +131,18 @@ public:
   // Ensure all forwarded inserts are applied to shards
   void flush() {
     for (unsigned tid = 0; tid < num_filters; ++tid) {
-      std::pair<uint32_t, uint32_t> hv;
-      while (queues[tid].try_dequeue(hv)) {
-        uint64_t h1 = hv.first;
-        uint64_t h2 = hv.second;
-        for (size_t i = 0; i < num_hash_functions; ++i) {
-          filters[tid].set(h1 + static_cast<uint64_t>(i) * h2);
+      // Use bulk dequeue for efficiency
+      size_t count = queues[tid].try_dequeue_bulk(bulk_reading[tid].data(), BULK_READ_MAX);
+      while (count > 0) {
+        for (size_t j = 0; j < count; ++j) {
+          const auto& hv = bulk_reading[tid][j];
+          uint64_t h1 = hv.first;
+          uint64_t h2 = hv.second;
+          for (size_t i = 0; i < num_hash_functions; ++i) {
+            filters[tid].set(h1 + static_cast<uint64_t>(i) * h2);
+          }
         }
+        count = queues[tid].try_dequeue_bulk(bulk_reading[tid].data(), BULK_READ_MAX);
       }
     }
   }

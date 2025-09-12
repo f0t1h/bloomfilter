@@ -15,9 +15,11 @@ all: simple_benchmark
 simple_benchmark: $(BENCHMARK_SRC) $(HEADER)
 	$(CXX) $(CXXFLAGS) -o simple_benchmark $(BENCHMARK_SRC)
 
+
 # Run benchmark
 run: simple_benchmark
 	./simple_benchmark
+
 
 # Utility targets
 clean:
