@@ -328,19 +328,19 @@ FBLOOM_SCOPE bool FBLOOM_NAME(contains)(FBLOOM_NAME(filter) *filter, const void 
                                         size_t item_size) {
   size_t i;
   FBLOOM_INT_TYPE bit_index;
+  bool result = true;
 
   if (!filter || !item || item_size == 0 || !filter->hash1 || !filter->hash2) {
     return false;
   }
 
+  // Branchless version - accumulate result using &=
   for (i = 0; i < filter->num_hash_functions; i++) {
     bit_index = FBLOOM_NAME(_get_hash)(item, item_size, i, filter->num_bits, filter->hash1,
                          filter->hash2);
-    if (!FBLOOM_NAME(_is_bit_set)(filter->bit_array, (size_t)bit_index)) {
-      return false;
-    }
+    result &= FBLOOM_NAME(_is_bit_set)(filter->bit_array, (size_t)bit_index);
   }
-  return true;
+  return result;
 }
 
 FBLOOM_SCOPE bool FBLOOM_NAME(insert)(FBLOOM_NAME(filter) *filter, const void *item,
@@ -384,18 +384,18 @@ FBLOOM_SCOPE bool FBLOOM_NAME(contains_with_hash)(FBLOOM_NAME(filter) *filter,
                                                   FBLOOM_INT_TYPE hash1, FBLOOM_INT_TYPE hash2) {
   size_t i;
   FBLOOM_INT_TYPE bit_index;
+  bool result = true;
 
   if (!filter || !filter->hash1 || !filter->hash2) {
     return false;
   }
 
+  // Branchless version - accumulate result using &=
   for (i = 0; i < filter->num_hash_functions; i++) {
     bit_index = (hash1 + i * hash2) % filter->num_bits;
-    if (!FBLOOM_NAME(_is_bit_set)(filter->bit_array, (size_t)bit_index)) {
-      return false;
-    }
+    result &= FBLOOM_NAME(_is_bit_set)(filter->bit_array, (size_t)bit_index);
   }
-  return true;
+  return result;
 }
 
 FBLOOM_SCOPE void FBLOOM_NAME(clear)(FBLOOM_NAME(filter) *filter) {

@@ -2,34 +2,78 @@
 
 # Compiler settings
 CXX = g++
-CXXFLAGS = -std=c++23 -pedantic -Wall -Wextra -ftree-vectorize -mtune=native -march=native -O2 -pthread -lm
+CXXSTD = -std=c++23
+CXXWARN = -pedantic -Wall -Wextra
+CXXOPT = -O3 -ftree-vectorize -mtune=native -march=native
+CXXFLAGS = $(CXXSTD) $(CXXWARN) $(CXXOPT) -pthread -lm
+
+# Directories
+SRC_DIR = .
+FBLOM_DIR = fbloom
+PLOT_DIR = benchmark_plots
 
 # Source files
 BENCHMARK_SRC = simple_benchmark.cpp
-HEADER = fbloom/bloom.h
+
+# Header files
+HEADERS = $(FBLOM_DIR)/bloom.h $(FBLOM_DIR)/gloom.h $(FBLOM_DIR)/parallel_bloom.h
+
+# Executables
+BENCHMARK_EXE = simple_benchmark
 
 # Default target
-all: simple_benchmark
+all: $(BENCHMARK_EXE)
 
 # Build benchmark
-simple_benchmark: $(BENCHMARK_SRC) $(HEADER)
-	$(CXX) $(CXXFLAGS) -o simple_benchmark $(BENCHMARK_SRC)
+$(BENCHMARK_EXE): $(BENCHMARK_SRC) $(HEADERS)
+	$(CXX) $(CXXFLAGS) -o $@ $<
 
-# Run benchmark
-run: simple_benchmark
-	./simple_benchmark
+# Alias target for convenience
+simple_benchmark: $(BENCHMARK_EXE)
+
+# Run targets
+run: $(BENCHMARK_EXE)
+	@echo "Running benchmark..."
+	./$(BENCHMARK_EXE)
+
+# Visualization targets
+viz: viz_benchmark.py benchmark_results.tsv
+	@echo "Generating visualizations for benchmark_results.tsv..."
+	@mkdir -p $(PLOT_DIR)
+	@source fbloom_py_env/bin/activate && python3 viz_benchmark.py benchmark_results.tsv
 
 # Utility targets
 clean:
-	rm -f simple_benchmark *.o *.a *.so
+	@echo "Cleaning build artifacts and generated files..."
+	rm -f $(BENCHMARK_EXE) *.o *.a *.so
+	rm -rf $(PLOT_DIR)
 	@echo "Clean completed"
 
-help:
-	@echo "=== Available Targets ==="
-	@echo "  all          - Build benchmark (default)"
-	@echo "  simple_benchmark - Build benchmark"
-	@echo "  run          - Run benchmark"
-	@echo "  clean        - Remove build artifacts"
-	@echo "  help         - Show this help"
+# Development targets
+debug: CXXFLAGS = $(CXXSTD) $(CXXWARN) -g -O0 -pthread -lm
+debug: $(BENCHMARK_EXE)
+	@echo "Debug build completed"
 
-.PHONY: all simple_benchmark run clean help
+# Help target
+help:
+	@echo "=== Bloom Filter Makefile ==="
+	@echo ""
+	@echo "Build Targets:"
+	@echo "  all              - Build benchmark (default)"
+	@echo "  simple_benchmark - Build benchmark"
+	@echo "  debug            - Build debug version with symbols"
+	@echo ""
+	@echo "Run Targets:"
+	@echo "  run              - Run benchmark"
+	@echo ""
+	@echo "Visualization Targets:"
+	@echo "  viz              - Generate plots for benchmark results"
+	@echo ""
+	@echo "Utility Targets:"
+	@echo "  clean            - Remove all build artifacts and plots"
+	@echo "  help             - Show this help message"
+	@echo ""
+	@echo "Compiler: $(CXX)"
+	@echo "Flags: $(CXXFLAGS)"
+
+.PHONY: all simple_benchmark debug run viz clean help

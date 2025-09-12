@@ -29,40 +29,40 @@ struct spinlock {
 
  
 
-template<typename mutex_type=null_mutex>
-struct LockedBloomFilter : public fbloom::BloomFilter {
+template<typename mutex_type=null_mutex, typename filter_impl=fbloom::BloomFilter>
+struct LockedBloomFilter : public filter_impl {
     // fbloom::BloomFilter filter;
     mutex_type mutex;
     template<class ...ARGS>
-    LockedBloomFilter(ARGS... args) : fbloom::BloomFilter(args...) {}
+    LockedBloomFilter(ARGS... args) : filter_impl(args...) {}
     template<typename T>
     bool insert(const T& item) {
         std::lock_guard<mutex_type> lock(mutex);
-        return fbloom::BloomFilter::insert(item);
+        return filter_impl::insert(item);
     }
     template<typename T>
     bool contains(const T& item) const {
-        return fbloom::BloomFilter::contains(item);
+        return filter_impl::contains(item);
     }
 
     bool insert_with_hash(size_t hash1, size_t hash2) {
         std::lock_guard<mutex_type> lock(mutex);
-        return fbloom::BloomFilter::insert_with_hash(hash1, hash2);
+        return filter_impl::insert_with_hash(hash1, hash2);
     }
 
     bool contains_with_hash(size_t hash1, size_t hash2) const {
-        return fbloom::BloomFilter::contains_with_hash(hash1, hash2);
+        return filter_impl::contains_with_hash(hash1, hash2);
     }
 };
 
-template< int N, typename mutex_type=null_mutex>
+template< int N, typename mutex_type=null_mutex, typename filter_impl=fbloom::BloomFilter>
 struct ParallelBloomFilter1 {
     static constexpr int num_filters = 1 << N;
     static constexpr unsigned filter_mask = num_filters - 1;
     fbloom::BloomFilter::hash_func_t hash1;
     fbloom::BloomFilter::hash_func_t hash2;
     size_t expected_elements_per_filter;
-    std::array<LockedBloomFilter<mutex_type>, num_filters> filters;
+    std::array<LockedBloomFilter<mutex_type, filter_impl>, num_filters> filters;
     static unsigned hash_func1(const void* data, size_t len) {
         return fbloom_murmurhash((const char*)data, len, 0);
     }
@@ -120,9 +120,9 @@ struct ParallelBloomFilter1 {
     }
     private:
     template <typename HashFunc1, typename HashFunc2, std::size_t... I>
-    static std::array<LockedBloomFilter<mutex_type>, num_filters> make_array(size_t expected_elements, double false_positive_rate, HashFunc1 hash1_func, HashFunc2 hash2_func, std::index_sequence<I...>) {
+    static std::array<LockedBloomFilter<mutex_type, filter_impl>, num_filters> make_array(size_t expected_elements, double false_positive_rate, HashFunc1 hash1_func, HashFunc2 hash2_func, std::index_sequence<I...>) {
         // Create array of LockedBloomFilter instances, each initialized with the same parameters
-        return { ( (void)I, LockedBloomFilter<mutex_type>{expected_elements, false_positive_rate, hash1_func, hash2_func} )... };
+        return { ( (void)I, LockedBloomFilter<mutex_type, filter_impl>{expected_elements, false_positive_rate, hash1_func, hash2_func} )... };
     }
 };
 
