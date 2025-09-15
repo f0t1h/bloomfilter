@@ -1,11 +1,9 @@
 #ifndef GLOOM_H
 #define GLOOM_H
 
-#include "bloom.h"
 #include "concurrentqueue.h"
 #include "external/xxhash.h"
 
-#include <array>
 #include <cmath>
 #include <cstring>
 #include <iterator>
@@ -65,12 +63,12 @@ public:
               double false_positive_rate)
       : num_threads(num_threads),
         bit_mask(num_threads - 1),
-        hashf1(default_hash1), hashf2(default_hash2),
+        queues(num_threads), bulk_reading(num_threads),
+        hashf1(default_hash1),
+        hashf2(default_hash2),
         per_thread_bits(calculate_bit_array_size(expected_elements, false_positive_rate)),
         expected_elements_per_thread{static_cast<size_t>(
-          round(expected_elements / static_cast<double>(num_threads)))},
-        num_hash_functions(calculate_hash_functions(per_thread_bits, expected_elements_per_thread)),
-        queues(num_threads), bulk_reading(num_threads), filters(num_threads) {
+          round(expected_elements / static_cast<double>(num_threads)))}, num_hash_functions(calculate_hash_functions(per_thread_bits, expected_elements_per_thread)), filters(num_threads) {
           assert(num_threads > 0);
           assert(__builtin_popcount(num_threads) == 1);
 
@@ -80,12 +78,12 @@ public:
               hash_func_t hash1, hash_func_t hash2)
       : num_threads(num_threads),
         bit_mask(num_threads - 1),
-        hashf1(hash1), hashf2(hash2),
+        queues(num_threads), bulk_reading(num_threads),
+        hashf1(hash1),
+        hashf2(hash2),
         per_thread_bits(calculate_bit_array_size(expected_elements, false_positive_rate)),
         expected_elements_per_thread{static_cast<size_t>(
-          round(expected_elements / static_cast<double>(num_threads)))},
-        num_hash_functions(calculate_hash_functions(per_thread_bits, expected_elements_per_thread)),
-        queues(num_threads), bulk_reading(num_threads), filters(num_threads) {
+          round(expected_elements / static_cast<double>(num_threads)))}, num_hash_functions(calculate_hash_functions(per_thread_bits, expected_elements_per_thread)), filters(num_threads) {
   }
 
   GloomFilter(const GloomFilter &) = delete;
