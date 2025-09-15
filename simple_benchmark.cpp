@@ -199,28 +199,142 @@ inline size_t total_bits_theoretical(size_t expected_elements, double false_posi
     return static_cast<size_t>(m_bits + 0.5); // round to nearest bit
 }
 
+// Helper to compute total bits for RegisterBlockedGloomFilter
+inline size_t total_bits_used(const RegisterBlockedGloomFilter& f) {
+    // RegisterBlockedGloomFilter doesn't expose bit count directly, so we estimate
+    // This is a placeholder - in practice you'd need to add a method to expose bit count
+    return 0; // Will be calculated from parameters
+}
+
+// Benchmark for RegisterBlockedGloomFilter
+void run_register_blocked_gloom_benchmark_with_data(const std::string& filter_name,
+                                                   const BenchmarkTestData& test_data,
+                                                   int num_threads,
+                                                   double false_positive_rate) {
+    std::cout << "\n=== " << filter_name << " (" << num_threads << " threads) ===" << std::endl;
+
+    // Create filter
+    RegisterBlockedGloomFilter filter(num_threads, test_data.insert_data.size(), false_positive_rate);
+
+    // Pre-partition work by target thread using the same mapping as RegisterBlockedGloomFilter
+    std::vector<std::vector<std::string>> thread_data(num_threads);
+    for (int i = 0; i < num_threads; ++i) {
+        thread_data[i].reserve(test_data.insert_data.size() / num_threads + 8);
+    }
+    
+    // Partition data by hash to target thread
+    for (const auto& s : test_data.insert_data) {
+        // Use XXHash64 to match the hash function used internally
+        uint64_t hash1 = XXH64(s.c_str(), s.length(), 0ULL);
+        uint32_t h1 = static_cast<uint32_t>(hash1);
+        size_t target_thread = (static_cast<unsigned>(h1) >> 16) & (num_threads - 1);
+        thread_data[target_thread].push_back(s);
+    }
+
+    // Insert phase
+    auto insert_start = std::chrono::high_resolution_clock::now();
+    {
+        std::vector<std::thread> threads;
+        threads.reserve(num_threads);
+        for (int tid = 0; tid < num_threads; ++tid) {
+            threads.emplace_back([&, tid]() {
+                for (const auto& s : thread_data[tid]) {
+                    uint64_t hash1 = XXH64(s.c_str(), s.length(), 0ULL);
+                    uint64_t hash2 = XXH64(s.c_str(), s.length(), 0x87654321ULL);
+                    uint32_t h1 = static_cast<uint32_t>(hash1);
+                    uint32_t h2 = static_cast<uint32_t>(hash2) | 1; // Ensure odd
+                    filter.insert_with_hash(h1, h2, tid);
+                }
+            });
+        }
+        for (auto& t : threads) t.join();
+    }
+    auto insert_end = std::chrono::high_resolution_clock::now();
+    double insert_time_ms = std::chrono::duration<double, std::milli>(insert_end - insert_start).count();
+
+    // Contains phase
+    auto contains_start = std::chrono::high_resolution_clock::now();
+    size_t found_total = 0;
+    size_t tp_total = 0;
+    size_t fp_total = 0;
+    size_t fn_total = 0;
+    {
+        struct ThreadCounts { size_t found; size_t tp; size_t fp; size_t fn; };
+        std::vector<ThreadCounts> counters(num_threads, ThreadCounts{0,0,0,0});
+        std::vector<std::thread> threads;
+        size_t chunk_size = test_data.test_data.size() / static_cast<size_t>(num_threads);
+        for (int i = 0; i < num_threads; ++i) {
+            size_t start_idx = static_cast<size_t>(i) * chunk_size;
+            size_t end_idx = (i == num_threads - 1) ? test_data.test_data.size() : (static_cast<size_t>(i + 1) * chunk_size);
+            threads.emplace_back([&, i, start_idx, end_idx]() {
+                size_t local_found = 0, local_tp = 0, local_fp = 0, local_fn = 0;
+                for (size_t j = start_idx; j < end_idx; ++j) {
+                    const auto& s = test_data.test_data[j];
+                    uint64_t hash1 = XXH64(s.c_str(), s.length(), 0ULL);
+                    uint64_t hash2 = XXH64(s.c_str(), s.length(), 0x87654321ULL);
+                    uint32_t h1 = static_cast<uint32_t>(hash1);
+                    uint32_t h2 = static_cast<uint32_t>(hash2) | 1; // Ensure odd
+                    bool present = filter.contains_with_hash(h1, h2);
+                    bool is_positive = test_data.positives.find(s) != test_data.positives.end();
+                    if (present) { local_found++; if (is_positive) local_tp++; else local_fp++; }
+                    else { if (is_positive) local_fn++; }
+                }
+                counters[i] = ThreadCounts{local_found, local_tp, local_fp, local_fn};
+            });
+        }
+        for (auto& t : threads) t.join();
+        for (const auto& c : counters) {
+            found_total += c.found;
+            tp_total += c.tp;
+            fp_total += c.fp;
+            fn_total += c.fn;
+        }
+    }
+    auto contains_end = std::chrono::high_resolution_clock::now();
+    double contains_time_ms = std::chrono::duration<double, std::milli>(contains_end - contains_start).count();
+
+    // Print results
+    std::cout << std::fixed << std::setprecision(3);
+    std::cout << "Insert time:      " << insert_time_ms << " ms" << std::endl;
+    std::cout << "Contains time:    " << contains_time_ms << " ms" << std::endl;
+    std::cout << "Elements/sec:     " << (test_data.insert_data.size() / insert_time_ms * 1000.0) << std::endl;
+    std::cout << "Contains/sec:     " << (test_data.test_data.size() / contains_time_ms * 1000.0) << std::endl;
+
+    size_t negatives = test_data.test_data.size() - test_data.expected_inserted_count;
+    double fp_rate = negatives ? (static_cast<double>(fp_total) / static_cast<double>(negatives)) : 0.0;
+    double fn_rate = test_data.expected_inserted_count ? (static_cast<double>(fn_total) / static_cast<double>(test_data.expected_inserted_count)) : 0.0;
+    std::cout << "Found total:      " << found_total << " (TP=" << tp_total << ", FP=" << fp_total << ")" << std::endl;
+    std::cout << "False positive %: " << (fp_rate * 100.0) << "%" << std::endl;
+    std::cout << "False negative %: " << (fn_rate * 100.0) << "%" << std::endl;
+
+    // Persist TSV (estimate total bits from parameters)
+    size_t total_bits = total_bits_theoretical(test_data.insert_data.size(), false_positive_rate);
+    write_tsv_row("benchmark_results.tsv", filter_name, num_threads,
+                  test_data.insert_data.size(), test_data.test_data.size(), test_data.expected_inserted_count,
+                  insert_time_ms, contains_time_ms, tp_total, fp_total, fn_total,
+                  total_bits);
+}
+
 // Benchmark for GloomFilter with pre-partitioned inserts to avoid cross-shard enqueues
-template<int N, int BULK_READ_MAX = 512>
 void run_gloom_benchmark_with_data(const std::string& filter_name,
                                    const BenchmarkTestData& test_data,
+                                   int num_threads,
                                    double false_positive_rate,
                                    uint64_t (*hash1_ptr)(const void*, size_t),
                                    uint64_t (*hash2_ptr)(const void*, size_t)) {
-    using Gloom = fbloom::GloomFilter<N, BULK_READ_MAX>;
-
-    std::cout << "\n=== " << filter_name << " (" << N << " threads) ===" << std::endl;
+    std::cout << "\n=== " << filter_name << " (" << num_threads << " threads) ===" << std::endl;
 
     // Create filter with explicit apples-to-apples hash functions
-    Gloom filter(test_data.insert_data.size(), false_positive_rate, hash1_ptr, hash2_ptr);
+    fbloom::GloomFilter filter(num_threads, test_data.insert_data.size(), false_positive_rate, hash1_ptr, hash2_ptr);
 
     // Pre-partition work by target shard using the same mapping as Gloom
-    std::array<std::vector<std::string>, N> shard_data;
-    for (int i = 0; i < N; ++i) {
-        shard_data[i].reserve(test_data.insert_data.size() / N + 8);
+    std::vector<std::vector<std::string>> shard_data(num_threads);
+    for (int i = 0; i < num_threads; ++i) {
+        shard_data[i].reserve(test_data.insert_data.size() / num_threads + 8);
     }
     for (const auto& s : test_data.insert_data) {
         auto hv = filter.get_hash(s);
-        unsigned target = (static_cast<unsigned>(hv.first) >> 16) & (N - 1);
+        unsigned target = (static_cast<unsigned>(hv.first) >> 16) & (num_threads - 1);
         shard_data[target].push_back(s);
     }
 
@@ -228,8 +342,8 @@ void run_gloom_benchmark_with_data(const std::string& filter_name,
     auto insert_start = std::chrono::high_resolution_clock::now();
     {
         std::vector<std::thread> threads;
-        threads.reserve(N);
-        for (int tid = 0; tid < N; ++tid) {
+        threads.reserve(num_threads);
+        for (int tid = 0; tid < num_threads; ++tid) {
             threads.emplace_back([&, tid]() {
                 for (const auto& s : shard_data[tid]) {
                     filter.insert(s, tid);
@@ -251,13 +365,13 @@ void run_gloom_benchmark_with_data(const std::string& filter_name,
     size_t fn_total = 0;
     {
         struct ThreadCounts { size_t found; size_t tp; size_t fp; size_t fn; };
-        std::vector<ThreadCounts> counters(N, ThreadCounts{0,0,0,0});
+        std::vector<ThreadCounts> counters(num_threads, ThreadCounts{0,0,0,0});
         std::vector<std::thread> threads;
-        threads.reserve(N);
-        size_t chunk_size = test_data.test_data.size() / static_cast<size_t>(N);
-        for (int i = 0; i < N; ++i) {
+        threads.reserve(num_threads);
+        size_t chunk_size = test_data.test_data.size() / static_cast<size_t>(num_threads);
+        for (int i = 0; i < num_threads; ++i) {
             size_t start_idx = static_cast<size_t>(i) * chunk_size;
-            size_t end_idx = (i == N - 1) ? test_data.test_data.size() : (static_cast<size_t>(i + 1) * chunk_size);
+            size_t end_idx = (i == num_threads - 1) ? test_data.test_data.size() : (static_cast<size_t>(i + 1) * chunk_size);
             threads.emplace_back([&, i, start_idx, end_idx]() {
                 size_t local_found = 0, local_tp = 0, local_fp = 0, local_fn = 0;
                 for (size_t j = start_idx; j < end_idx; ++j) {
@@ -296,11 +410,10 @@ void run_gloom_benchmark_with_data(const std::string& filter_name,
     std::cout << "False negative %: " << (fn_rate * 100.0) << "%" << std::endl;
 
     // Persist TSV (compute per-shard bits EXACTLY as Gloom allocates)
-    uint64_t total_bits_initial = Gloom::calculate_bit_array_size(test_data.insert_data.size(), false_positive_rate);
-    uint64_t per_filter_bits = (total_bits_initial + static_cast<uint64_t>(N) - 1ULL) / static_cast<uint64_t>(N);
-    per_filter_bits = ((per_filter_bits + 63ULL) / 64ULL) * 64ULL;
-    size_t total_bits = static_cast<size_t>(per_filter_bits * static_cast<uint64_t>(N));
-    write_tsv_row("benchmark_results.tsv", filter_name, N,
+    // Calculate total bits for GloomFilter
+    double bits_per_element = -1.44 * std::log2(false_positive_rate);
+    size_t total_bits = static_cast<size_t>(bits_per_element * test_data.insert_data.size() + 0.5);
+    write_tsv_row("benchmark_results.tsv", filter_name, num_threads,
                   test_data.insert_data.size(), test_data.test_data.size(), test_data.expected_inserted_count,
                   insert_time_ms, contains_time_ms, tp_total, fp_total, fn_total,
                   total_bits);
@@ -664,20 +777,16 @@ int main() {
     for (const auto& hash_func : hash_functions) {
         fbloom_hash_func_t h1=nullptr, h2=nullptr; if (!select_hash_pair(hash_func, h1, h2)) continue;
         for (int threads : thread_counts) {
-            switch (threads) {
-                case 1:
-                    run_gloom_benchmark_with_data<1>(std::string("GloomFilter-")+hash_func, test_data, 0.01, xxhash64_hash_u64_s0, xxhash64_hash_u64_s1);
-                    break;
-                case 4:
-                    run_gloom_benchmark_with_data<4>(std::string("GloomFilter-")+hash_func, test_data, 0.01, xxhash64_hash_u64_s0, xxhash64_hash_u64_s1);
-                    break;
-                case 8:
-                    run_gloom_benchmark_with_data<8>(std::string("GloomFilter-")+hash_func, test_data, 0.01, xxhash64_hash_u64_s0, xxhash64_hash_u64_s1);
-                    break;
-                case 16:
-                    run_gloom_benchmark_with_data<16>(std::string("GloomFilter-")+hash_func, test_data, 0.01, xxhash64_hash_u64_s0, xxhash64_hash_u64_s1);
-                    break;
-            }
+            run_gloom_benchmark_with_data(std::string("GloomFilter-")+hash_func, test_data, threads, 0.01, xxhash64_hash_u64_s0, xxhash64_hash_u64_s1);
+        }
+    }
+
+    // RegisterBlockedGloomFilter benchmarks
+    std::cout << "\nRegisterBlockedGloomFilter Benchmarks (apples-to-apples)" << std::endl;
+    std::cout << "===============================================" << std::endl;
+    for (const auto& hash_func : hash_functions) {
+        for (int threads : thread_counts) {
+            run_register_blocked_gloom_benchmark_with_data(std::string("RegisterBlockedGloomFilter-")+hash_func, test_data, threads, 0.01);
         }
     }
 

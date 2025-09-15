@@ -36,47 +36,56 @@ struct bits {
   size_t size() const { return long_count * 64; }
   void clear() { bitv.assign(long_count, 0); }
 };
-template <int N, int BULK_READ_MAX = 512> class GloomFilter {
+
+class GloomFilter {
 private:
   using hash_func_t = uint64_t (*)(const void *, size_t);
+  static constexpr unsigned BULK_READ_MAX = 512;
 
-  static constexpr unsigned num_filters = N;
-
-  static constexpr unsigned bit_mask = num_filters - 1;
-  std::array<moodycamel::ConcurrentQueue<std::pair<uint32_t, uint32_t>>, num_filters> queues;
-  std::array<std::vector<std::pair<uint32_t, uint32_t>>, num_filters> bulk_reading;
+  unsigned num_threads;
+  unsigned bit_mask;
+  std::vector<moodycamel::ConcurrentQueue<std::pair<uint32_t, uint32_t>>> queues;
+  std::vector<std::vector<std::pair<uint32_t, uint32_t>>> bulk_reading;
   hash_func_t hashf1;
   hash_func_t hashf2;
-  size_t expected_elements_per_filter;
+  size_t per_thread_bits;
+  size_t expected_elements_per_thread;
   size_t num_hash_functions;
-  std::array<bits, num_filters> filters;
-  static uint64_t default_hash1(const void *data, size_t len) { return XXH64(data, len, 0ULL); }
-  static uint64_t default_hash2(const void *data, size_t len) { return XXH64(data, len, 0x9E3779B97F4A7C15ULL); }
 
-public:
-  GloomFilter(size_t expected_elements, double false_positive_rate)
-      : hashf1(default_hash1), hashf2(default_hash2),
-        expected_elements_per_filter{static_cast<size_t>(
-            round(expected_elements / static_cast<double>(num_filters)))}
-  {
-    uint64_t total_bits = calculate_bit_array_size(expected_elements, false_positive_rate);
-    uint64_t per_filter_bits = (total_bits + num_filters - 1) / num_filters;
-    per_filter_bits = ((per_filter_bits + 63) / 64) * 64;
-    filters = make_array_bits(per_filter_bits, std::make_index_sequence<num_filters>());
-    num_hash_functions = calculate_hash_functions(per_filter_bits, expected_elements_per_filter);
+  std::vector<bits> filters;
+  static uint64_t default_hash1(const void *data, size_t len) {
+    return XXH64(data, len, 0ULL);
+  }
+  static uint64_t default_hash2(const void *data, size_t len) {
+    return XXH64(data, len, 0x9E3779B97F4A7C15ULL);
   }
 
-  GloomFilter(size_t expected_elements, double false_positive_rate,
+public:
+  GloomFilter(size_t num_threads, size_t expected_elements,
+              double false_positive_rate)
+      : num_threads(num_threads),
+        bit_mask(num_threads - 1),
+        hashf1(default_hash1), hashf2(default_hash2),
+        per_thread_bits(calculate_bit_array_size(expected_elements, false_positive_rate)),
+        expected_elements_per_thread{static_cast<size_t>(
+          round(expected_elements / static_cast<double>(num_threads)))},
+        num_hash_functions(calculate_hash_functions(per_thread_bits, expected_elements_per_thread)),
+        queues(num_threads), bulk_reading(num_threads), filters(num_threads) {
+          assert(num_threads > 0);
+          assert(__builtin_popcount(num_threads) == 1);
+
+  }
+
+  GloomFilter(size_t num_threads, size_t expected_elements, double false_positive_rate,
               hash_func_t hash1, hash_func_t hash2)
-      : hashf1(hash1), hashf2(hash2),
-        expected_elements_per_filter{static_cast<size_t>(
-            round(expected_elements / static_cast<double>(num_filters)))}
-  {
-    uint64_t total_bits = calculate_bit_array_size(expected_elements, false_positive_rate);
-    uint64_t per_filter_bits = (total_bits + num_filters - 1) / num_filters;
-    per_filter_bits = ((per_filter_bits + 63) / 64) * 64;
-    filters = make_array_bits(per_filter_bits, std::make_index_sequence<num_filters>());
-    num_hash_functions = calculate_hash_functions(per_filter_bits, expected_elements_per_filter);
+      : num_threads(num_threads),
+        bit_mask(num_threads - 1),
+        hashf1(hash1), hashf2(hash2),
+        per_thread_bits(calculate_bit_array_size(expected_elements, false_positive_rate)),
+        expected_elements_per_thread{static_cast<size_t>(
+          round(expected_elements / static_cast<double>(num_threads)))},
+        num_hash_functions(calculate_hash_functions(per_thread_bits, expected_elements_per_thread)),
+        queues(num_threads), bulk_reading(num_threads), filters(num_threads) {
   }
 
   GloomFilter(const GloomFilter &) = delete;
@@ -105,9 +114,10 @@ public:
   }
   template <typename T> bool insert(const T &item, int tid) {
     {
-      size_t count = queues[tid].try_dequeue_bulk(bulk_reading[tid].data(), BULK_READ_MAX);
+      size_t count =
+          queues[tid].try_dequeue_bulk(bulk_reading[tid].data(), BULK_READ_MAX);
       for (size_t j = 0; j < count; ++j) {
-        const auto& hv = bulk_reading[tid][j];
+        const auto &hv = bulk_reading[tid][j];
         uint64_t h1 = hv.first;
         uint64_t h2 = hv.second;
         for (size_t i = 0; i < num_hash_functions; ++i) {
@@ -116,10 +126,13 @@ public:
       }
     }
     auto [hash_value1, hash_value2] = get_hash(item);
-    size_t target_filter = (static_cast<unsigned>(hash_value1) >> 16) & bit_mask;
+    size_t target_filter =
+        (static_cast<unsigned>(hash_value1) >> 16) & bit_mask;
     if (tid == static_cast<int>(target_filter)) {
       for (size_t i = 0; i < num_hash_functions; ++i) {
-        filters[target_filter].set(static_cast<uint64_t>(hash_value1) + static_cast<uint64_t>(i) * static_cast<uint64_t>(hash_value2));
+        filters[target_filter].set(static_cast<uint64_t>(hash_value1) +
+                                   static_cast<uint64_t>(i) *
+                                       static_cast<uint64_t>(hash_value2));
       }
     } else {
       queues[target_filter].enqueue({hash_value1, hash_value2});
@@ -128,18 +141,18 @@ public:
     return true;
   }
 
-
 private:
   // Common bulk insert implementation
   template <typename Iterator>
   size_t insert_bulk_impl(Iterator begin, Iterator end, int tid) {
     size_t inserted_count = 0;
-    
+
     {
       bulk_reading[tid].clear();
-      size_t count = queues[tid].try_dequeue_bulk(std::back_inserter(bulk_reading[tid]), BULK_READ_MAX);
+      size_t count = queues[tid].try_dequeue_bulk(
+          std::back_inserter(bulk_reading[tid]), BULK_READ_MAX);
       for (size_t j = 0; j < count; ++j) {
-        const auto& hv = bulk_reading[tid][j];
+        const auto &hv = bulk_reading[tid][j];
         uint64_t h1 = hv.first;
         uint64_t h2 = hv.second;
         for (size_t i = 0; i < num_hash_functions; ++i) {
@@ -150,21 +163,23 @@ private:
 
     for (auto it = begin; it != end; ++it) {
       auto [hash_value1, hash_value2] = get_hash(*it);
-      size_t target_filter = (static_cast<unsigned>(hash_value1) >> 16) & bit_mask;
-      
+      size_t target_filter =
+          (static_cast<unsigned>(hash_value1) >> 16) & bit_mask;
+
       if (tid == static_cast<int>(target_filter)) {
         for (size_t i = 0; i < num_hash_functions; ++i) {
-          filters[target_filter].set(static_cast<uint64_t>(hash_value1) + static_cast<uint64_t>(i) * static_cast<uint64_t>(hash_value2));
+          filters[target_filter].set(static_cast<uint64_t>(hash_value1) +
+                                     static_cast<uint64_t>(i) *
+                                         static_cast<uint64_t>(hash_value2));
         }
         ++inserted_count;
       } else {
         queues[target_filter].enqueue({hash_value1, hash_value2});
       }
     }
-    
+
     return inserted_count;
   }
-
 
 public:
   template <typename Iterator>
@@ -172,22 +187,22 @@ public:
     return insert_bulk_impl(begin, end, tid);
   }
 
-
 #if __cpp_lib_ranges >= 201911L
   template <std::ranges::input_range Range>
-  size_t insert_bulk_range(const Range& range, int tid) {
+  size_t insert_bulk_range(const Range &range, int tid) {
     return insert_bulk_impl(range.begin(), range.end(), tid);
   }
 
 #endif
 
   void flush() {
-    for (unsigned tid = 0; tid < num_filters; ++tid) {
+    for (unsigned tid = 0; tid < num_threads; ++tid) {
       bulk_reading[tid].clear();
-      size_t count = queues[tid].try_dequeue_bulk(std::back_inserter(bulk_reading[tid]), BULK_READ_MAX);
+      size_t count = queues[tid].try_dequeue_bulk(
+          std::back_inserter(bulk_reading[tid]), BULK_READ_MAX);
       while (count > 0) {
         for (size_t j = 0; j < count; ++j) {
-          const auto& hv = bulk_reading[tid][j];
+          const auto &hv = bulk_reading[tid][j];
           uint64_t h1 = hv.first;
           uint64_t h2 = hv.second;
           for (size_t i = 0; i < num_hash_functions; ++i) {
@@ -195,16 +210,20 @@ public:
           }
         }
         bulk_reading[tid].clear();
-        count = queues[tid].try_dequeue_bulk(std::back_inserter(bulk_reading[tid]), BULK_READ_MAX);
+        count = queues[tid].try_dequeue_bulk(
+            std::back_inserter(bulk_reading[tid]), BULK_READ_MAX);
       }
     }
   }
   template <typename T> bool contains(const T &item) const {
     auto [hash_value1, hash_value2] = get_hash(item);
-    size_t target_filter = (static_cast<unsigned>(hash_value1) >> 16) & bit_mask;
+    size_t target_filter =
+        (static_cast<unsigned>(hash_value1) >> 16) & bit_mask;
     bool contain_flag = true;
     for (size_t i = 0; i < num_hash_functions; ++i) {
-      if (!filters[target_filter].get(static_cast<uint64_t>(hash_value1) + static_cast<uint64_t>(i) * static_cast<uint64_t>(hash_value2))) {
+      if (!filters[target_filter].get(static_cast<uint64_t>(hash_value1) +
+                                      static_cast<uint64_t>(i) *
+                                          static_cast<uint64_t>(hash_value2))) {
         contain_flag = false;
         break;
       }
@@ -237,22 +256,93 @@ public:
     k = (size_t)((double)num_bits / expected_elements * 0.6931471805599453);
     return k > 0 ? k : 1;
   }
-  template <typename HashFunc1, typename HashFunc2, std::size_t... I>
-  static std::array<bits, num_filters>
-  make_array(size_t expected_elements, double false_positive_rate,
-             HashFunc1 hash1_func, HashFunc2 hash2_func,
-             std::index_sequence<I...>) {
-    (void)hash1_func; (void)hash2_func;
-    uint64_t bit_count =
-        calculate_bit_array_size(expected_elements, false_positive_rate);
-    return {((void)I, bits{bit_count})...};
+};
+
+struct RegisterBlockedGloomFilter {
+private:
+  static constexpr unsigned BULK_READ_MAX = 512;
+  using hash_func_t = uint64_t (*)(const void *, size_t);
+  size_t bit_count;
+  unsigned num_threads;
+  unsigned num_blocks;
+  unsigned bit_mask;
+  std::vector<std::vector<uint64_t>> filters;
+  std::vector<moodycamel::ConcurrentQueue<std::pair<uint32_t, uint32_t>>>
+      queues;
+  std::vector<std::vector<std::pair<uint32_t, uint32_t>>> bulk_reading;
+  size_t num_hash_functions;
+
+public:
+  RegisterBlockedGloomFilter(size_t num_threads, size_t expected_elements,
+                             double false_positive_rate)
+      : bit_count(
+            calculate_bit_array_size(expected_elements, false_positive_rate)),
+        num_threads(num_threads), num_blocks(bit_count / 64),
+        bit_mask(num_threads - 1),
+        filters(num_threads, std::vector<uint64_t>(num_blocks, 0)),
+        queues(num_threads), bulk_reading(num_threads),
+        num_hash_functions(
+            calculate_hash_functions(bit_count, expected_elements)) {}
+
+  const uint64_t *GetBlock(uint32_t target_filter, uint32_t h1,
+                           uint32_t h2) const {
+    uint32_t block_idx = h1 % num_blocks;
+    return &filters[target_filter].at(block_idx);
   }
-  template <std::size_t... I>
-  static std::array<bits, num_filters>
-  make_array_bits(uint64_t bit_count, std::index_sequence<I...>) {
-    return {((void)I, bits{bit_count})...};
+  uint64_t *GetBlock(uint32_t target_filter, uint32_t h1, uint32_t h2) {
+    uint32_t block_idx = h1 % num_blocks;
+    return &filters[target_filter][block_idx];
+  }
+  uint64_t ConstructMask(uint32_t h1, uint32_t h2) const {
+    uint64_t mask = 0;
+    for (int i = 1; i < num_hash_functions; i++) {
+      uint32_t bit_pos = (h1 + i * h2) % 64;
+      mask |= (1ull << bit_pos);
+    }
+    return mask;
+  }
+
+  bool contains_with_hash(uint32_t h1, uint32_t h2) const {
+    size_t target_filter = (static_cast<unsigned>(h1) >> 16) & bit_mask;
+    const uint64_t *block = GetBlock(target_filter, h1, h2);
+    uint64_t mask = ConstructMask(h1, h2);
+    return (*block & mask) == mask;
+  }
+
+  bool insert_with_hash(uint32_t hash_value1, uint32_t hash_value2, int tid) {
+    size_t count = queues[tid].try_dequeue_bulk(
+        std::back_inserter(bulk_reading[tid]), BULK_READ_MAX);
+    for (size_t j = 0; j < count; ++j) {
+      const auto &hv = bulk_reading[tid][j];
+      uint64_t *block = GetBlock(tid, hv.first, hv.second);
+      *block |= ConstructMask(hv.first, hv.second);
+    }
+    bulk_reading[tid].clear();
+
+    size_t target_filter =
+        (static_cast<unsigned>(hash_value1) >> 16) & bit_mask;
+    if (tid == static_cast<int>(target_filter)) {
+      uint64_t *block = GetBlock(tid, hash_value1, hash_value2);
+      *block |= ConstructMask(hash_value1, hash_value2);
+    } else {
+      queues[target_filter].enqueue({hash_value1, hash_value2});
+      return false;
+    }
+    return true;
+  }
+
+private:
+  static size_t calculate_bit_array_size(size_t expected_elements,
+                                         double false_positive_rate) {
+    return static_cast<size_t>(
+        -1.44 * expected_elements * std::log2(false_positive_rate) + 0.5);
+  }
+  static size_t calculate_hash_functions(size_t num_bits,
+                                         size_t expected_elements) {
+    return static_cast<size_t>(-std::log2(1.0 / expected_elements) + 0.5);
   }
 };
+
 } // namespace fbloom
 
 #endif
