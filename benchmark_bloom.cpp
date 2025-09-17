@@ -3,6 +3,10 @@
 #include <vector>
 #include <iostream>
 #include <unordered_set>
+#include <fstream>
+#include <algorithm>
+#include <random>
+
 // TODO Include the bloom filter headers
 template <class BF>
 concept BloomFilterType = requires(BF bf) {
@@ -56,7 +60,27 @@ template <BloomFilterType BF> struct BloomBenchmark {
 
 int main(int argc, char** argv) {
     std::vector<int> threads = {1, 4, 8, 16};
+    int insertions = 100000;
+    int queries = 100000;
     std::vector<std::string> filter_names = 
     {...};
- //TODO run the benchmarks   
-}
+    std::ifstream inputFile;
+    inputFile.open("whitelist/3M-february-2018.txt", std::ifstream::in);
+    std::vector<std::string> whitelist;
+    while (!inputFile.eof()) {
+        std::string line;
+        std::getline(inputFile, line);
+        whitelist.push_back(line);
+    }
+    inputFile.close();
+
+    // generate insert_data and query_data randomly from whitelist
+    std::vector<std::string> insert_data;
+    std::vector<std::string> query_data;
+    auto rng = std::default_random_engine(42);
+    std::shuffle(std::begin(whitelist), std::end(whitelist), rng);
+    insert_data = std::vector<std::string>(whitelist.begin(), whitelist.begin() + insertions);
+    query_data = std::vector<std::string>(whitelist.begin() + insertions, whitelist.begin() + insertions + queries);
+
+    return 0;
+}   
