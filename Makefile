@@ -16,7 +16,7 @@ PLOT_DIR = benchmark_plots
 BENCHMARK_SRC = simple_benchmark.cpp
 
 # Header files
-HEADERS = $(FBLOM_DIR)/bloom.h $(FBLOM_DIR)/gloom.h $(FBLOM_DIR)/parallel_bloom.h
+HEADERS = $(FBLOM_DIR)/bloom.h $(FBLOM_DIR)/gloom.h $(FBLOM_DIR)/parallel_bloom.h $(FBLOM_DIR)/gloom_clean.h
 
 # Executables
 BENCHMARK_EXE = simple_benchmark

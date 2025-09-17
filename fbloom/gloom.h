@@ -261,7 +261,7 @@ private:
   static constexpr unsigned BULK_READ_MAX = 512;
   using hash_func_t = uint64_t (*)(const void *, size_t);
   size_t bit_count;
-  unsigned num_threads;
+  [[maybe_unused]] unsigned num_threads;
   unsigned num_blocks;
   unsigned bit_mask;
   std::vector<std::vector<uint64_t>> filters;
@@ -283,17 +283,17 @@ public:
             calculate_hash_functions(bit_count, expected_elements)) {}
 
   const uint64_t *GetBlock(uint32_t target_filter, uint32_t h1,
-                           uint32_t h2) const {
+                           uint32_t /* h2 */) const {
     uint32_t block_idx = h1 % num_blocks;
     return &filters[target_filter].at(block_idx);
   }
-  uint64_t *GetBlock(uint32_t target_filter, uint32_t h1, uint32_t h2) {
+  uint64_t *GetBlock(uint32_t target_filter, uint32_t h1, uint32_t /* h2 */) {
     uint32_t block_idx = h1 % num_blocks;
     return &filters[target_filter][block_idx];
   }
   uint64_t ConstructMask(uint32_t h1, uint32_t h2) const {
     uint64_t mask = 0;
-    for (int i = 1; i < num_hash_functions; i++) {
+    for (size_t i = 1; i < num_hash_functions; i++) {
       uint32_t bit_pos = (h1 + i * h2) % 64;
       mask |= (1ull << bit_pos);
     }
@@ -335,7 +335,7 @@ private:
     return static_cast<size_t>(
         -1.44 * expected_elements * std::log2(false_positive_rate) + 0.5);
   }
-  static size_t calculate_hash_functions(size_t num_bits,
+  static size_t calculate_hash_functions(size_t /* num_bits */,
                                          size_t expected_elements) {
     return static_cast<size_t>(-std::log2(1.0 / expected_elements) + 0.5);
   }
