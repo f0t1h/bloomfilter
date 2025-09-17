@@ -1,0 +1,12 @@
+[
+  {
+    "directory": "/Users/fatihkaraoglanoglu/Workspace/git/bloomfilter",
+    "command": "g++ -std=c++23 -pedantic -Wall -Wextra -O3 -ftree-vectorize -mtune=native -march=native -pthread -lm -o simple_benchmark simple_benchmark.cpp",
+    "file": "simple_benchmark.cpp"
+  },
+  {
+    "directory": "/Users/fatihkaraoglanoglu/Workspace/git/bloomfilter",
+    "command": "g++ -std=c++20 -pedantic -Wall -Wextra -O3 -ftree-vectorize -mtune=native -march=native -pthread -lm -o benchmark_bloom benchmark_bloom.cpp",
+    "file": "benchmark_bloom.cpp"
+  }
+]
