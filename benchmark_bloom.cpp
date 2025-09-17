@@ -2,12 +2,27 @@
 #include <utility>
 #include <vector>
 #include <iostream>
-
+#include <unordered_set>
 // TODO Include the bloom filter headers
 template <class BF>
 concept BloomFilterType = requires(BF bf) {
   { bf.Insert(uint32_t{}, uint32_t{}) } -> std::same_as<void>;
   { bf.Query(uint32_t{}, uint32_t{}) } -> std::same_as<bool>;
+  { bf.TotalBitsUsed() } -> std::same_as<size_t>;
+};
+
+
+struct unordered_set_baseline {
+  std::unordered_set<std::pair<uint32_t, uint32_t>> set;
+  void Insert(uint32_t h1, uint32_t h2) {
+    set.insert({h1, h2});
+  }
+  bool Query(uint32_t h1, uint32_t h2) {
+    return set.find({h1, h2}) != set.end();
+  }
+  size_t TotalBitsUsed() const {
+    return set.bucket_count() * set.max_load_factor() * sizeof(std::pair<uint32_t, uint32_t>) * 8;
+  }
 };
 
 struct BenchmarkDataPoint {
