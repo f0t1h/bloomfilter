@@ -449,8 +449,8 @@ inline std::pair<FBLOOM_INT_TYPE, FBLOOM_INT_TYPE> BloomFilter::get_hash(const T
     hv1 = filter_.hash1(item.c_str(), item.length());
     hv2 = filter_.hash2(item.c_str(), item.length());
   } else if constexpr (std::is_same<T, const char*>::value || std::is_same<T, char*>::value) {
-    hv1 = filter_.hash1(item, std::strlen(item));
-    hv2 = filter_.hash2(item, std::strlen(item));
+    hv1 = filter_.hash1(item, strlen(item));
+    hv2 = filter_.hash2(item, strlen(item));
   } else if constexpr (std::is_trivially_copyable_v<T>) {
     hv1 = filter_.hash1(reinterpret_cast<const void*>(&item), sizeof(T));
     hv2 = filter_.hash2(reinterpret_cast<const void*>(&item), sizeof(T));
